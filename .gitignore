@@ -1,0 +1,19 @@
+# Generated sprint file — don't commit, it's created by sprint.py
+prd.json
+
+# Backlog contains project-specific data — users generate their own
+backlog.json
+
+# Ralph runtime files
+scripts/ralph/progress.txt
+scripts/ralph/.last-branch
+scripts/ralph/archive/
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# OS
+.DS_Store
+Thumbs.db
