@@ -4,6 +4,7 @@
 #
 # This is the extended version of Ralph that supports large backlogs
 # by splitting them into manageable sprint-sized prd.json files.
+# When a sprint completes, the next sprint is loaded automatically.
 #
 # Workflow:
 #   1. Put your user stories in docs/userstories/*.md
@@ -49,7 +50,52 @@ PROGRESS_FILE="$SCRIPT_DIR/progress.txt"
 ARCHIVE_DIR="$SCRIPT_DIR/archive"
 LAST_BRANCH_FILE="$SCRIPT_DIR/.last-branch"
 
-# Preflight checks
+# --- Helper functions ---
+
+sync_to_backlog() {
+  if [ -f "$BACKLOG_FILE" ] && [ -f "$PRD_FILE" ]; then
+    python -c "
+import json
+with open('$PRD_FILE','r',encoding='utf-8') as f: prd=json.load(f)
+with open('$BACKLOG_FILE','r',encoding='utf-8') as f: bl=json.load(f)
+done={s['id'] for s in prd['userStories'] if s['passes']}
+for s in bl['userStories']:
+    if s['id'] in done: s['passes']=True
+with open('$BACKLOG_FILE','w',encoding='utf-8') as f: json.dump(bl,f,ensure_ascii=False,indent=2)
+print(f'Synced {len(done)} completed stories to backlog.json')
+" 2>/dev/null || true
+  fi
+}
+
+count_remaining() {
+  python -c "
+import json
+with open('$PRD_FILE', 'r', encoding='utf-8') as f:
+    d = json.load(f)
+print(sum(1 for s in d['userStories'] if not s['passes']))
+" 2>/dev/null || echo "?"
+}
+
+load_next_sprint() {
+  echo ""
+  echo "---------------------------------------------------------------"
+  echo "  Loading next sprint..."
+  echo "---------------------------------------------------------------"
+  python "$PROJECT_ROOT/scripts/sprint.py" 2>&1
+}
+
+backlog_all_done() {
+  python -c "
+import json, sys
+with open('$BACKLOG_FILE', 'r', encoding='utf-8') as f:
+    bl = json.load(f)
+remaining = sum(1 for s in bl['userStories'] if not s['passes'])
+sys.exit(0 if remaining == 0 else 1)
+" 2>/dev/null
+}
+
+# --- Preflight checks ---
+
 if [ ! -f "$PRD_FILE" ]; then
   echo "Error: $PRD_FILE not found."
   echo ""
@@ -65,18 +111,17 @@ if [ ! -f "$PRD_FILE" ]; then
   exit 1
 fi
 
-# Check how many stories are left
-REMAINING=$(python -c "
-import json
-with open('$PRD_FILE', 'r', encoding='utf-8') as f:
-    d = json.load(f)
-print(sum(1 for s in d['userStories'] if not s['passes']))
-" 2>/dev/null || echo "?")
+REMAINING=$(count_remaining)
 
 if [ "$REMAINING" = "0" ]; then
-  echo "All stories in current sprint are complete!"
-  echo "Load the next sprint: python scripts/sprint.py"
-  exit 0
+  # Current sprint done — try loading next
+  sync_to_backlog
+  if backlog_all_done; then
+    echo "All stories in entire backlog are complete!"
+    exit 0
+  fi
+  load_next_sprint
+  REMAINING=$(count_remaining)
 fi
 
 # Archive previous run if branch changed
@@ -120,6 +165,8 @@ echo "Starting Ralph Extended - Tool: $TOOL - Max iterations: $MAX_ITERATIONS"
 echo "Sprint: $REMAINING stories remaining"
 echo ""
 
+# --- Main loop (iterations span across sprints) ---
+
 for i in $(seq 1 $MAX_ITERATIONS); do
   echo ""
   echo "==============================================================="
@@ -132,49 +179,42 @@ for i in $(seq 1 $MAX_ITERATIONS); do
     OUTPUT=$(claude --dangerously-skip-permissions --print < "$SCRIPT_DIR/CLAUDE.md" 2>&1 | tee /dev/stderr) || true
   fi
 
-  # Check for completion signal
+  # Check for sprint completion signal
   if echo "$OUTPUT" | grep -q "<promise>COMPLETE</promise>"; then
     echo ""
     echo "Sprint complete!"
+    sync_to_backlog
 
-    # Sync passes back to backlog
-    if [ -f "$BACKLOG_FILE" ]; then
-      python -c "
-import json
-with open('$PRD_FILE','r',encoding='utf-8') as f: prd=json.load(f)
-with open('$BACKLOG_FILE','r',encoding='utf-8') as f: bl=json.load(f)
-done={s['id'] for s in prd['userStories'] if s['passes']}
-for s in bl['userStories']:
-    if s['id'] in done: s['passes']=True
-with open('$BACKLOG_FILE','w',encoding='utf-8') as f: json.dump(bl,f,ensure_ascii=False,indent=2)
-print(f'Synced {len(done)} completed stories to backlog.json')
-" 2>/dev/null || true
+    # Check if entire backlog is done
+    if backlog_all_done; then
+      echo ""
+      echo "==============================================================="
+      echo "  ALL SPRINTS COMPLETE — Entire backlog done!"
+      echo "  Finished at iteration $i of $MAX_ITERATIONS"
+      echo "==============================================================="
+      exit 0
     fi
 
-    echo "Load next sprint: python scripts/sprint.py"
-    echo "Completed at iteration $i of $MAX_ITERATIONS"
-    exit 0
+    # Load next sprint and continue
+    load_next_sprint
+    REMAINING=$(count_remaining)
+
+    if [ "$REMAINING" = "0" ]; then
+      echo "No more stories to work on."
+      exit 0
+    fi
+
+    echo "Continuing with next sprint: $REMAINING stories remaining"
   fi
 
   echo "Iteration $i complete. Continuing..."
   sleep 2
 done
 
-# Sync passes back to backlog even when max iterations reached
-if [ -f "$BACKLOG_FILE" ]; then
-  python -c "
-import json
-with open('$PRD_FILE','r',encoding='utf-8') as f: prd=json.load(f)
-with open('$BACKLOG_FILE','r',encoding='utf-8') as f: bl=json.load(f)
-done={s['id'] for s in prd['userStories'] if s['passes']}
-for s in bl['userStories']:
-    if s['id'] in done: s['passes']=True
-with open('$BACKLOG_FILE','w',encoding='utf-8') as f: json.dump(bl,f,ensure_ascii=False,indent=2)
-print(f'Synced {len(done)} completed stories to backlog.json')
-" 2>/dev/null || true
-fi
+# Max iterations reached — sync and report
+sync_to_backlog
 
 echo ""
 echo "Ralph reached max iterations ($MAX_ITERATIONS)."
-echo "Run again to continue, or load next sprint."
+echo "Run again to continue: bash scripts/ralph/ralph.sh --tool $TOOL $MAX_ITERATIONS"
 exit 1
